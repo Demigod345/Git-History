@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Git Commit Date Rewriter
+Git Commit Date Rewriter - Optimized Version
 
 This script modifies the dates of recent Git commits to make them appear as if they were made:
 1. Within a specific date range (configurable start/end dates)
@@ -21,7 +21,7 @@ import argparse
 import random
 import sys
 from datetime import datetime, timedelta, time
-from typing import List, Tuple
+from typing import List, Tuple, Dict
 import re
 
 
@@ -118,52 +118,85 @@ class GitCommitRewriter:
 
         return random_date.replace(hour=random_hour, minute=random_minute, second=0, microsecond=0)
 
-
-    def rewrite_commit_date(self, commit_hash: str, new_date: datetime) -> bool:
-        """Rewrite the author and committer date of a specific commit using git filter-branch."""
-        try:
-            # Format date for Git
+    def build_env_filter_script(self, commit_date_map: Dict[str, datetime]) -> str:
+        """Build a comprehensive env-filter script for all commits."""
+        script_parts = []
+        
+        # Start with the main conditional structure
+        for i, (commit_hash, new_date) in enumerate(commit_date_map.items()):
             git_date = new_date.strftime("%Y-%m-%d %H:%M:%S")
-
-            # Prepare environment variables
-            env = {
-                "GIT_AUTHOR_DATE": git_date,
-                "GIT_COMMITTER_DATE": git_date,
-            }
-
-            # Add author information if provided
+            
+            # Use if/elif/else structure for better performance
+            condition = "if" if i == 0 else "elif"
+            
+            script_parts.append(f'{condition} [ "$GIT_COMMIT" = "{commit_hash}" ]; then')
+            script_parts.append(f'    export GIT_AUTHOR_DATE="{git_date}"')
+            script_parts.append(f'    export GIT_COMMITTER_DATE="{git_date}"')
+            
             if self.author_name:
-                env["GIT_AUTHOR_NAME"] = self.author_name
-                env["GIT_COMMITTER_NAME"] = self.author_name
-
+                script_parts.append(f'    export GIT_AUTHOR_NAME="{self.author_name}"')
+                script_parts.append(f'    export GIT_COMMITTER_NAME="{self.author_name}"')
+            
             if self.author_email:
-                env["GIT_AUTHOR_EMAIL"] = self.author_email
-                env["GIT_COMMITTER_EMAIL"] = self.author_email
+                script_parts.append(f'    export GIT_AUTHOR_EMAIL="{self.author_email}"')
+                script_parts.append(f'    export GIT_COMMITTER_EMAIL="{self.author_email}"')
+        
+        # Close the conditional structure
+        script_parts.append('fi')
+        
+        return '\n'.join(script_parts)
 
-            # Use git filter-branch to modify the specific commit
+    def rewrite_commits_batch(self, commit_count: int) -> bool:
+        """Rewrite all commits in a single git filter-branch operation."""
+        commits = self.get_recent_commits(commit_count)
+        if not commits:
+            print("No commits found to rewrite")
+            return False
+
+        print(f"Found {len(commits)} commits to rewrite")
+
+        # Generate new dates (chronologically ordered, earliest first)
+        new_dates = []
+        for _ in range(len(commits)):
+            new_dates.append(self.generate_random_work_datetime())
+        new_dates.sort()  # Sort so earliest date is first
+
+        # Create commit-to-date mapping
+        commit_date_map = {}
+        for i, commit_hash in enumerate(commits):
+            # Reverse the date assignment: newest commit gets latest date
+            date_index = len(commits) - 1 - i
+            new_date = new_dates[date_index]
+            commit_date_map[commit_hash] = new_date
+
+        print("\nDate assignment plan:")
+        for i, commit_hash in enumerate(commits):
+            original_date = self.get_commit_original_date(commit_hash)
+            new_date = commit_date_map[commit_hash]
+            commit_order = "newest" if i == 0 else ("oldest" if i == len(commits) - 1 else f"#{i+1}")
+            print(f"{commit_hash[:8]} ({commit_order}) | Original: {original_date.strftime('%Y-%m-%d %H:%M:%S') if original_date else 'Unknown'} -> New: {new_date.strftime('%Y-%m-%d %H:%M:%S')}")
+
+        # Build the env-filter script
+        env_filter_script = self.build_env_filter_script(commit_date_map)
+        
+        print(f"\nExecuting single git filter-branch operation for {len(commits)} commits...")
+        
+        try:
+            # Use git filter-branch with the comprehensive env-filter
             self._run_git_command(
-                [
-                    "git", "filter-branch", "-f", "--env-filter",
-                    f"""
-                    if [ "$GIT_COMMIT" = "{commit_hash}" ]; then
-                        export GIT_AUTHOR_DATE="{git_date}"
-                        export GIT_COMMITTER_DATE="{git_date}"
-                        {f'export GIT_AUTHOR_NAME="{self.author_name}"' if self.author_name else ""}
-                        {f'export GIT_COMMITTER_NAME="{self.author_name}"' if self.author_name else ""}
-                        {f'export GIT_AUTHOR_EMAIL="{self.author_email}"' if self.author_email else ""}
-                        {f'export GIT_COMMITTER_EMAIL="{self.author_email}"' if self.author_email else ""}
-                    fi
-                    """
-                ],
-                env=env,
+                ["git", "filter-branch", "-f", "--env-filter", env_filter_script],
                 check=True,
                 capture_output=True,
+                text=True
             )
-
+            
+            print("Successfully completed batch rewrite operation!")
             return True
-
+            
         except subprocess.CalledProcessError as e:
-            print(f"Error rewriting commit {commit_hash[:8]}: {e}")
+            print(f"Error during batch rewrite: {e}")
+            if e.stderr:
+                print(f"Error details: {e.stderr}")
             return False
 
     def backup_branch(self) -> str:
@@ -190,7 +223,8 @@ class GitCommitRewriter:
             print(f"Warning: Could not create backup branch: {e}")
             return ""
 
-    def get_commit_original_date(self, commit_hash: str) -> str | None:
+    def get_commit_original_date(self, commit_hash: str) -> datetime | None:
+        """Get the original date of a commit."""
         try:
             result = self._run_git_command(
                 ["git", "show", "-s", "--format=%ad", "--date=iso-strict", commit_hash],
@@ -210,91 +244,65 @@ class GitCommitRewriter:
             print(f"Unexpected error getting date for commit {commit_hash[:8]}: {e}", file=sys.stderr)
             return None
 
-    def rewrite_commits_sequential(self, commit_count: int) -> bool:
-        """Rewrite commits one by one from newest to oldest, but assign dates chronologically."""
-        commits = self.get_recent_commits(commit_count)
-        if not commits:
-            print("No commits found to rewrite")
-            return False
-
-        print(f"Found {len(commits)} commits to rewrite")
-
-        # Generate new dates (chronologically ordered, earliest first)
-        new_dates = []
-        for _ in range(len(commits)):
-            new_dates.append(self.generate_random_work_datetime())
-        new_dates.sort()  # Sort so earliest date is first
-
-        print("\nDate assignment plan:")
-        for i, commit_hash in enumerate(commits):
-            # Reverse the date assignment: newest commit gets latest date
-            # date_index = len(commits) - 1 - i
-            # new_date = new_dates[date_index]
-            # commit_order = "newest" if i == 0 else ("oldest" if i == len(commits) - 1 else f"#{i+1}")
-            # print(f"  {commit_hash[:8]} ({commit_order}) -> {new_date}")
-            original_date = self.get_commit_original_date(commit_hash)
-            new_date = new_dates[len(commits) - 1 - i]
-            print(f"{commit_hash[:8]} | Original: {original_date.strftime('%Y-%m-%d %H:%M:%S') if original_date else 'Unknown'} -> New: {new_date.strftime('%Y-%m-%d %H:%M:%S')}")
-
-        print("\nProcessing commits from newest to oldest:")
-
-        # Process commits from newest to oldest (c -> b -> a)
-        # But assign dates so oldest gets earliest date, newest gets latest date
-        success_count = 0  # Assume all will succeed unless one fails
-
-        for i, commit_hash in enumerate(commits):  # commits[0] is newest (most recent)
-            # Reverse the date assignment
-            date_index = len(commits) - 1 - i
-            new_date = new_dates[date_index]
-
-            print(f"Rewriting commit {commit_hash[:8]} to {new_date} from original date {self.get_commit_original_date(commit_hash)}")
-
-            if self.rewrite_commit_date(commit_hash, new_date):
-                success_count += 1
-            else:
-                print(f"Failed to rewrite commit {commit_hash[:8]}, stopping")
-                break
-
-        return success_count == len(commits)
+    def clean_filter_branch_refs(self):
+        """Clean up filter-branch backup refs to avoid conflicts."""
+        try:
+            # Remove the refs/original/* references that filter-branch creates
+            self._run_git_command(
+                ["git", "for-each-ref", "--format=%(refname)", "refs/original/"],
+                check=True, capture_output=True, text=True
+            )
+            
+            # Delete the refs/original namespace
+            self._run_git_command(
+                ["git", "update-ref", "-d", "refs/original/refs/heads/master"],
+                capture_output=True  # Don't fail if this doesn't exist
+            )
+            
+            # Run garbage collection to clean up
+            self._run_git_command(
+                ["git", "reflog", "expire", "--expire=now", "--all"],
+                capture_output=True
+            )
+            self._run_git_command(
+                ["git", "gc", "--prune=now", "--aggressive"],
+                capture_output=True
+            )
+            
+        except subprocess.CalledProcessError:
+            # These cleanup operations are optional
+            pass
 
     def rewrite_commits(self, commit_count: int, create_backup: bool = True) -> None:
-        """Rewrite the specified number of recent commits."""
+        """Rewrite the specified number of recent commits using optimized batch processing."""
         if not self.check_git_repo():
             print(f"Error: Not a Git repository: {self.repo_path}")
             return
 
         print(f"Working with repository: {self.repo_path}")
 
+        # Clean up any previous filter-branch operations
+        self.clean_filter_branch_refs()
+
         # Create backup
         if create_backup:
             self.backup_branch()
 
-        print("Using sequential method (newest to oldest)...")
-        success = self.rewrite_commits_sequential(commit_count)
+        print("Using optimized batch processing method...")
+        success = self.rewrite_commits_batch(commit_count)
 
         if success:
-            print(f"\nSuccessfully rewrote {commit_count} commits!")
+            print(f"\nSuccessfully rewrote {commit_count} commits in a single operation!")
             print("\nWarning: Git history has been modified!")
             print("If you've already pushed these commits, you'll need to force push:")
             print("git push --force-with-lease")
         else:
-            print("\nSome commits could not be rewritten. Check the output above for details.")
-
-    def is_most_recent_commit(self, commit_hash: str) -> bool:
-        """Check if the given commit is the most recent one."""
-        try:
-            result = self._run_git_command(
-                ["git", "rev-parse", "HEAD"],
-                check=True, capture_output=True, text=True
-            )
-            return result.stdout.strip().startswith(commit_hash)
-        except subprocess.CalledProcessError:
-            return False
+            print("\nCommits could not be rewritten. Check the output above for details.")
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Rewrite Git commit dates to appear within specified parameters",
+        description="Rewrite Git commit dates to appear within specified parameters (Optimized Version)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -344,7 +352,7 @@ Examples:
         if args.dry_run:
             print("DRY RUN MODE - No changes will be made")
             commits = rewriter.get_recent_commits(args.commits)
-            print(f"Would rewrite {len(commits)} commits:")
+            print(f"Would rewrite {len(commits)} commits in a single batch operation:")
 
             # Generate dates for preview
             new_dates = []
@@ -352,11 +360,20 @@ Examples:
                 new_dates.append(rewriter.generate_random_work_datetime())
             new_dates.sort()  # Sort so earliest date is first
 
-            print("\nDate assignment plan:")
-            for i, commit in enumerate(commits):
-                # Reverse the date assignment: newest commit gets latest date  
+            # Create commit-to-date mapping for preview
+            commit_date_map = {}
+            for i, commit_hash in enumerate(commits):
                 date_index = len(commits) - 1 - i
                 new_date = new_dates[date_index]
+                commit_date_map[commit_hash] = new_date
+
+            print("\nOptimized env-filter script preview:")
+            env_filter_script = rewriter.build_env_filter_script(commit_date_map)
+            print(env_filter_script)
+
+            print("\nDate assignment plan:")
+            for i, commit in enumerate(commits):
+                new_date = commit_date_map[commit]
                 commit_order = "newest" if i == 0 else ("oldest" if i == len(commits) - 1 else f"#{i+1}")
                 author_info = ""
                 if args.author_name or args.author_email:
@@ -380,3 +397,4 @@ Examples:
 
 if __name__ == "__main__":
     main()
+    
