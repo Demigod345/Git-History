@@ -337,7 +337,7 @@ class TestGitCommitRewriterIntegration(unittest.TestCase):
 
 class TestMainFunction(unittest.TestCase):
     
-    @patch('sys.argv', ['git_rewriter.py', '--start-date', '2024-01-01', '--end-date', '2024-01-31'])
+    @patch('sys.argv', ['git_rewriter.py', '--all', '--start-date', '2024-01-01', '--end-date', '2024-01-31'])
     @patch('builtins.input', return_value='n')
     def test_main_user_cancellation(self, mock_input):
         """Test main function when user cancels operation."""
@@ -348,7 +348,7 @@ class TestMainFunction(unittest.TestCase):
         mock_print.assert_any_call("This will modify Git history!")
         mock_print.assert_any_call("Cancelled")
     
-    @patch('sys.argv', ['git_rewriter.py','--all' , '--start-date', '2024-01-31', '--end-date', '2024-01-01'])
+    @patch('sys.argv', ['git_rewriter.py', '--all', '--start-date', '2024-01-31', '--end-date', '2024-01-01'])
     def test_main_invalid_date_range(self):
         """Test main function with invalid date range."""
         with patch('builtins.print') as mock_print, \

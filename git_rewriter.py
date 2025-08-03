@@ -69,8 +69,45 @@ class GitCommitRewriter:
 
         return random_date.replace(hour=random_hour, minute=random_minute, second=0, microsecond=0)
 
-    def build_env_filter_script(self, commit_date_map: Dict[str, datetime]) -> str:
-        script_parts = []
+    def build_env_filter_script(self, commit_date_map: Dict[str, datetime], total_commits: int) -> str:
+        progress_file = os.path.join(self.repo_path, ".git", "rewrite_progress")
+        
+        script_parts = [
+            '# Initialize progress tracking',
+            f'PROGRESS_FILE="{progress_file}"',
+            'TOTAL_COMMITS=' + str(total_commits),
+            '',
+            '# Initialize counter file if it doesn\'t exist',
+            'if [ ! -f "$PROGRESS_FILE" ]; then',
+            '    echo "0" > "$PROGRESS_FILE"',
+            'fi',
+            '',
+            '# Read current count and increment',
+            'CURRENT_COUNT=$(cat "$PROGRESS_FILE")',
+            'CURRENT_COUNT=$((CURRENT_COUNT + 1))',
+            'echo "$CURRENT_COUNT" > "$PROGRESS_FILE"',
+            '',
+            '# Calculate and display progress',
+            'PERCENT=$((CURRENT_COUNT * 100 / TOTAL_COMMITS))',
+            'FILLED=$((CURRENT_COUNT * 50 / TOTAL_COMMITS))',
+            'EMPTY=$((50 - FILLED))',
+            '',
+            '# Build progress bar',
+            'BAR=""',
+            'i=1; while [ $i -le $FILLED ]; do BAR="${BAR}█"; i=$((i+1)); done',
+            'i=1; while [ $i -le $EMPTY ]; do BAR="${BAR}░"; i=$((i+1)); done',
+            '',
+            '# Display progress to terminal (bypass git output)',
+            'printf "\\033[2K\\rProgress: [%s] %d/%d (%d%%)" "$BAR" "$CURRENT_COUNT" "$TOTAL_COMMITS" "$PERCENT" > /dev/tty',
+            '',
+            '# Add newline when complete and cleanup',
+            'if [ "$CURRENT_COUNT" -eq "$TOTAL_COMMITS" ]; then',
+            '    printf "\\n" > /dev/tty',
+            '    rm -f "$PROGRESS_FILE"',
+            'fi',
+            '',
+            '# Commit date mapping'
+        ]
         
         for i, (commit_hash, new_date) in enumerate(commit_date_map.items()):
             git_date = new_date.strftime("%Y-%m-%d %H:%M:%S")
@@ -114,17 +151,26 @@ class GitCommitRewriter:
             date_index = len(commits) - 1 - i
             commit_date_map[commit_hash] = new_dates[date_index]
 
-        env_filter_script = self.build_env_filter_script(commit_date_map)
+        env_filter_script = self.build_env_filter_script(commit_date_map, len(commits))
         
+        # Clean up any existing progress file
+        progress_file = os.path.join(self.repo_path, ".git", "rewrite_progress")
+        if os.path.exists(progress_file):
+            os.remove(progress_file)
+        
+        print("Rewriting commits...")
         try:
             self._run_git_command(
                 ["git", "filter-branch", "-f", "--env-filter", env_filter_script],
-                check=True, capture_output=True, text=True
+                check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, text=True
             )
             print(f"Successfully rewrote {len(commits)} commits!")
             return True
         except subprocess.CalledProcessError as e:
-            print(f"Error during rewrite: {e}")
+            print(f"\nError during rewrite: {e}")
+            # Clean up progress file on error
+            if os.path.exists(progress_file):
+                os.remove(progress_file)
             return False
 
     def _create_backup(self):
